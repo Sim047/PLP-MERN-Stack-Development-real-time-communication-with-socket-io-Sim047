@@ -22,12 +22,28 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ---------------------------
+// CLEAN FRONTEND URL (IMPORTANT)
+// ---------------------------
+let FRONTEND = process.env.FRONTEND_URL || "*";
+FRONTEND = FRONTEND.replace(/\/$/, ""); // remove trailing slash
+
+console.log("🔵 Allowed CORS Origin:", FRONTEND);
+
+// ---------------------------
 // App + Socket setup
 // ---------------------------
 const app = express();
 const server = http.createServer(app);
 
-const FRONTEND = process.env.FRONTEND_URL || "*";
+app.use(
+  cors({
+    origin: FRONTEND,
+    credentials: true,
+  })
+);
+
+app.use(express.json({ limit: "25mb" }));
+
 const io = new Server(server, {
   cors: {
     origin: FRONTEND,
@@ -35,15 +51,14 @@ const io = new Server(server, {
   },
 });
 
-app.use(cors({ origin: FRONTEND }));
-app.use(express.json({ limit: "20mb" }));
-
-// Static uploads
+// ---------------------------
+// Static File Hosting
+// ---------------------------
 const UPLOAD_DIR = process.env.UPLOAD_DIR || "uploads";
 app.use("/uploads", express.static(path.join(__dirname, "..", UPLOAD_DIR)));
 
 // ---------------------------
-// Routes
+// API Routes
 // ---------------------------
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
@@ -51,14 +66,15 @@ app.use("/api/messages", messageRoutes);
 app.use("/api/files", fileRoutes);
 
 // ---------------------------
-// Socket.io Logic
+// Socket.IO Logic
 // ---------------------------
 const onlineUsers = new Map();
 
 io.on("connection", (socket) => {
-  console.log("[io] User connected:", socket.id);
+  console.log("🟢 User connected:", socket.id);
 
   const clientUser = socket.handshake.auth?.user;
+
   if (clientUser && (clientUser._id || clientUser.id)) {
     const uid = clientUser._id || clientUser.id;
     onlineUsers.set(uid, socket.id);
@@ -66,9 +82,7 @@ io.on("connection", (socket) => {
     io.emit("presence_update", { userId: uid, status: "online" });
   }
 
-  socket.on("join_room", (room) => {
-    socket.join(room);
-  });
+  socket.on("join_room", (room) => socket.join(room));
 
   socket.on("send_message", async ({ room, message }) => {
     try {
@@ -78,7 +92,7 @@ io.on("connection", (socket) => {
         room,
         fileUrl: message.fileUrl || "",
         replyTo: message.replyTo || null,
-        createdAt: message.createdAt ? new Date(message.createdAt) : new Date(),
+        createdAt: new Date(),
       });
 
       const populated = await Message.findById(saved._id)
@@ -88,23 +102,18 @@ io.on("connection", (socket) => {
 
       io.to(room).emit("receive_message", populated);
     } catch (err) {
-      console.error("[io] send_message error:", err);
-      socket.emit("error_message", { message: "Saving message failed" });
+      console.error("❌ send_message error:", err);
     }
   });
 
-  // Reactions
   socket.on("react", async ({ room, messageId, userId, emoji }) => {
     try {
-      if (userId?.id) userId = userId.id;
-      if (userId?._id) userId = userId._id;
+      userId = userId?.id || userId?._id || userId;
 
       const msg = await Message.findById(messageId);
       if (!msg) return;
 
-      const exists = msg.reactions.find(
-        (r) => String(r.userId) === String(userId)
-      );
+      const exists = msg.reactions.find((r) => String(r.userId) === String(userId));
 
       if (exists && exists.emoji === emoji) {
         msg.reactions = msg.reactions.filter(
@@ -126,20 +135,17 @@ io.on("connection", (socket) => {
 
       io.to(room).emit("reaction_update", populated);
     } catch (err) {
-      console.error("[io] react error:", err);
+      console.error("❌ react error:", err);
     }
   });
 
-  // Typing indicators
-  socket.on("typing", ({ room, userId, typing }) => {
-    socket.to(room).emit("typing", { userId, typing });
-  });
+  socket.on("typing", ({ room, userId, typing }) =>
+    socket.to(room).emit("typing", { userId, typing })
+  );
 
-  // Delivered + Read receipts
   socket.on("delivered", async ({ room, messageId, userId }) => {
     try {
-      if (userId?.id) userId = userId.id;
-      if (userId?._id) userId = userId._id;
+      userId = userId?.id || userId?._id || userId;
 
       const msg = await Message.findById(messageId);
       if (!msg) return;
@@ -151,14 +157,13 @@ io.on("connection", (socket) => {
 
       io.to(room).emit("delivered", { messageId, userId });
     } catch (err) {
-      console.error("[io] delivered error:", err);
+      console.error("❌ delivered error:", err);
     }
   });
 
   socket.on("read", async ({ room, messageId, userId }) => {
     try {
-      if (userId?.id) userId = userId.id;
-      if (userId?._id) userId = userId._id;
+      userId = userId?.id || userId?._id || userId;
 
       const msg = await Message.findById(messageId);
       if (!msg) return;
@@ -170,7 +175,7 @@ io.on("connection", (socket) => {
 
       io.to(room).emit("read", { messageId, userId });
     } catch (err) {
-      console.error("[io] read error:", err);
+      console.error("❌ read error:", err);
     }
   });
 
@@ -186,30 +191,21 @@ io.on("connection", (socket) => {
 });
 
 // ---------------------------
-// Database Connection + Server Start
+// Database connect
 // ---------------------------
-const PORT = process.env.PORT || 5000;
+const MONGO = process.env.MONGO_URI;
 
-if (!process.env.MONGO_URI) {
-  console.log("❌ MONGO_URI missing in environment");
-  process.exit(1);
-}
-
-// DEBUG LOGS — DO NOT REMOVE
-console.log("==== DEBUG MONGO_URI VALUE ====");
-console.log(JSON.stringify(process.env.MONGO_URI));
-console.log("Length:", process.env.MONGO_URI.length);
-console.log("================================");
+console.log("🔵 Connecting to Mongo:", MONGO);
 
 mongoose
-  .connect(process.env.MONGO_URI, { autoIndex: true })
+  .connect(MONGO)
   .then(() => {
-    console.log("✅ Connected to MongoDB");
-    server.listen(PORT, () =>
-      console.log("🚀 Server running on port", PORT)
+    console.log("✅ MongoDB connected!");
+    server.listen(process.env.PORT || 5000, () =>
+      console.log("🚀 Server online on port", process.env.PORT || 5000)
     );
   })
   .catch((err) => {
-    console.error("❌ mongo connect err:", err.message);
+    console.error("❌ Mongo connection failed:", err.message);
     process.exit(1);
   });
