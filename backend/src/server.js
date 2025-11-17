@@ -15,35 +15,45 @@ import messageRoutes from "./routes/messages.js";
 import fileRoutes from "./routes/files.js";
 import Message from "./models/Message.js";
 
-// ---------------------------
-// Path setup
-// ---------------------------
+// ======================================================
+// Path Setup
+// ======================================================
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ---------------------------
-// CLEAN FRONTEND URL (IMPORTANT)
-// ---------------------------
-let FRONTEND = process.env.FRONTEND_URL || "*";
+// ======================================================
+// FRONTEND_URL CLEANING (CRITICAL! NO TRAILING SLASH)
+// ======================================================
+let FRONTEND = (process.env.FRONTEND_URL || "*").trim();
 FRONTEND = FRONTEND.replace(/\/$/, ""); // remove trailing slash
 
-console.log("🔵 Allowed CORS Origin:", FRONTEND);
+console.log("🔵 FRONTEND_URL USED:", FRONTEND);
 
-// ---------------------------
-// App + Socket setup
-// ---------------------------
+// ======================================================
+// Express + Socket Server
+// ======================================================
 const app = express();
 const server = http.createServer(app);
 
+// CORS FOR EXPRESS
 app.use(
   cors({
     origin: FRONTEND,
     credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE"],
   })
 );
 
+// Parse JSON
 app.use(express.json({ limit: "25mb" }));
 
+// Static uploads folder
+const UPLOAD_DIR = process.env.UPLOAD_DIR || "uploads";
+app.use("/uploads", express.static(path.join(__dirname, "..", UPLOAD_DIR)));
+
+// ======================================================
+// SOCKET.IO WITH CLEAN CORS
+// ======================================================
 const io = new Server(server, {
   cors: {
     origin: FRONTEND,
@@ -51,39 +61,24 @@ const io = new Server(server, {
   },
 });
 
-// ---------------------------
-// Static File Hosting
-// ---------------------------
-const UPLOAD_DIR = process.env.UPLOAD_DIR || "uploads";
-app.use("/uploads", express.static(path.join(__dirname, "..", UPLOAD_DIR)));
-
-// ---------------------------
-// API Routes
-// ---------------------------
-app.use("/api/auth", authRoutes);
-app.use("/api/users", userRoutes);
-app.use("/api/messages", messageRoutes);
-app.use("/api/files", fileRoutes);
-
-// ---------------------------
-// Socket.IO Logic
-// ---------------------------
+// Track online users
 const onlineUsers = new Map();
 
 io.on("connection", (socket) => {
-  console.log("🟢 User connected:", socket.id);
+  console.log("⚡ User connected:", socket.id);
 
   const clientUser = socket.handshake.auth?.user;
-
   if (clientUser && (clientUser._id || clientUser.id)) {
     const uid = clientUser._id || clientUser.id;
     onlineUsers.set(uid, socket.id);
-
     io.emit("presence_update", { userId: uid, status: "online" });
   }
 
-  socket.on("join_room", (room) => socket.join(room));
+  socket.on("join_room", (room) => {
+    socket.join(room);
+  });
 
+  // SEND MESSAGE
   socket.on("send_message", async ({ room, message }) => {
     try {
       const saved = await Message.create({
@@ -92,7 +87,7 @@ io.on("connection", (socket) => {
         room,
         fileUrl: message.fileUrl || "",
         replyTo: message.replyTo || null,
-        createdAt: new Date(),
+        createdAt: message.createdAt ? new Date(message.createdAt) : new Date(),
       });
 
       const populated = await Message.findById(saved._id)
@@ -106,14 +101,18 @@ io.on("connection", (socket) => {
     }
   });
 
+  // REACT
   socket.on("react", async ({ room, messageId, userId, emoji }) => {
     try {
-      userId = userId?.id || userId?._id || userId;
+      if (userId?.id) userId = userId.id;
+      if (userId?._id) userId = userId._id;
 
       const msg = await Message.findById(messageId);
       if (!msg) return;
 
-      const exists = msg.reactions.find((r) => String(r.userId) === String(userId));
+      const exists = msg.reactions.find(
+        (r) => String(r.userId) === String(userId)
+      );
 
       if (exists && exists.emoji === emoji) {
         msg.reactions = msg.reactions.filter(
@@ -139,13 +138,16 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("typing", ({ room, userId, typing }) =>
-    socket.to(room).emit("typing", { userId, typing })
-  );
+  // TYPING
+  socket.on("typing", ({ room, userId, typing }) => {
+    socket.to(room).emit("typing", { userId, typing });
+  });
 
+  // DELIVERED
   socket.on("delivered", async ({ room, messageId, userId }) => {
     try {
-      userId = userId?.id || userId?._id || userId;
+      if (userId?.id) userId = userId.id;
+      if (userId?._id) userId = userId._id;
 
       const msg = await Message.findById(messageId);
       if (!msg) return;
@@ -161,9 +163,11 @@ io.on("connection", (socket) => {
     }
   });
 
+  // READ
   socket.on("read", async ({ room, messageId, userId }) => {
     try {
-      userId = userId?.id || userId?._id || userId;
+      if (userId?.id) userId = userId.id;
+      if (userId?._id) userId = userId._id;
 
       const msg = await Message.findById(messageId);
       if (!msg) return;
@@ -179,6 +183,7 @@ io.on("connection", (socket) => {
     }
   });
 
+  // DISCONNECT
   socket.on("disconnect", () => {
     for (const [uid, sid] of onlineUsers.entries()) {
       if (sid === socket.id) {
@@ -190,22 +195,35 @@ io.on("connection", (socket) => {
   });
 });
 
-// ---------------------------
-// Database connect
-// ---------------------------
-const MONGO = process.env.MONGO_URI;
+// ======================================================
+// API ROUTES
+// ======================================================
+app.use("/api/auth", authRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/messages", messageRoutes);
+app.use("/api/files", fileRoutes);
 
-console.log("🔵 Connecting to Mongo:", MONGO);
+// ======================================================
+// DB CONNECTION + SERVER START
+// ======================================================
+const PORT = process.env.PORT || 5000;
+
+if (!process.env.MONGO_URI) {
+  console.error("❌ ERROR: MONGO_URI missing!");
+  process.exit(1);
+}
+
+console.log("🟣 MONGO_URI:", process.env.MONGO_URI);
 
 mongoose
-  .connect(MONGO)
+  .connect(process.env.MONGO_URI, { autoIndex: true })
   .then(() => {
-    console.log("✅ MongoDB connected!");
-    server.listen(process.env.PORT || 5000, () =>
-      console.log("🚀 Server online on port", process.env.PORT || 5000)
+    console.log("✅ MongoDB connected");
+    server.listen(PORT, () =>
+      console.log(`🚀 Server running on port ${PORT}`)
     );
   })
   .catch((err) => {
-    console.error("❌ Mongo connection failed:", err.message);
+    console.error("❌ MongoDB connection error:", err.message);
     process.exit(1);
   });
